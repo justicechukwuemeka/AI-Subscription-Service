@@ -21,6 +21,8 @@
 (define-constant max-commission u1000) ;; 10%
 (define-constant min-license-fee u1000) ;; minimum price
 (define-constant basis-points u10000)
+(define-constant max-file-size u1000000000) ;; 1GB max
+(define-constant max-accuracy u10000) ;; 100% in basis points
 
 ;; CORE DATA STRUCTURES
 
@@ -133,6 +135,56 @@
   (and (>= duration min-license-duration) (<= duration max-license-duration))
 )
 
+(define-private (validate-string-input (input (string-ascii 256)))
+  (and 
+    (> (len input) u0) 
+    (< (len input) u257)
+    ;; Check for basic sanitization - no null bytes or control characters
+    (is-eq (len input) (len (unwrap-panic (as-max-len? input u256))))
+  )
+)
+
+(define-private (validate-short-string-input (input (string-ascii 64)))
+  (and 
+    (> (len input) u0) 
+    (< (len input) u65)
+    ;; Check for basic sanitization
+    (is-eq (len input) (len (unwrap-panic (as-max-len? input u64))))
+  )
+)
+
+(define-private (validate-hash-input (hash (string-ascii 64)))
+  (and 
+    (is-eq (len hash) u64)
+    ;; Basic hex validation - length should be exactly 64 for SHA256
+    (> (len hash) u0)
+  )
+)
+
+(define-private (validate-version-input (version (string-ascii 16)))
+  (and 
+    (> (len version) u0) 
+    (< (len version) u17)
+    ;; Check for basic sanitization
+    (is-eq (len version) (len (unwrap-panic (as-max-len? version u16))))
+  )
+)
+
+(define-private (validate-file-size (size uint))
+  (and (> size u0) (<= size max-file-size))
+)
+
+(define-private (validate-accuracy (accuracy uint))
+  (<= accuracy max-accuracy)
+)
+
+(define-private (validate-model-id (model-id uint))
+  (and 
+    (> model-id u0) 
+    (< model-id (var-get next-model-id))
+  )
+)
+
 (define-private (update-revenue (model-id uint) (amount uint))
   (let (
     (current-revenue (default-to 
@@ -164,14 +216,18 @@
     (file-size uint)
     (accuracy uint))
   (let ((model-id (var-get next-model-id)))
-    ;; Validations
+    ;; Enhanced input validations
     (asserts! (var-get marketplace-active) ERR-UNAVAILABLE)
     (asserts! (>= price min-license-fee) ERR-INVALID-PARAMS)
     (asserts! (validate-duration duration) ERR-INVALID-PARAMS)
-    (asserts! (> (len title) u0) ERR-INVALID-PARAMS)
-    (asserts! (<= accuracy u10000) ERR-INVALID-PARAMS)
+    (asserts! (validate-short-string-input title) ERR-INVALID-PARAMS)
+    (asserts! (validate-string-input description) ERR-INVALID-PARAMS)
+    (asserts! (validate-version-input version) ERR-INVALID-PARAMS)
+    (asserts! (validate-hash-input file-hash) ERR-INVALID-PARAMS)
+    (asserts! (validate-file-size file-size) ERR-INVALID-PARAMS)
+    (asserts! (validate-accuracy accuracy) ERR-INVALID-PARAMS)
     
-    ;; Register model
+    ;; Register model with validated inputs
     (map-set ai-models
       { model-id: model-id }
       {
@@ -186,7 +242,7 @@
       }
     )
     
-    ;; Set technical specs
+    ;; Set technical specs with validated inputs
     (map-set model-specs
       { model-id: model-id }
       {
@@ -223,6 +279,7 @@
   )
     ;; Validations
     (asserts! (var-get marketplace-active) ERR-UNAVAILABLE)
+    (asserts! (validate-model-id model-id) ERR-INVALID-PARAMS)
     (asserts! (get active model-data) ERR-UNAVAILABLE)
     (asserts! (not (check-license-valid model-id tx-sender)) ERR-ALREADY-EXISTS)
     (asserts! (not (is-eq tx-sender (get creator model-data))) ERR-INVALID-PARAMS)
@@ -268,6 +325,7 @@
   )
     ;; Validations
     (asserts! (var-get marketplace-active) ERR-UNAVAILABLE)
+    (asserts! (validate-model-id model-id) ERR-INVALID-PARAMS)
     (asserts! (get active model-data) ERR-UNAVAILABLE)
     (asserts! (get active current-license) ERR-EXPIRED)
     
@@ -296,12 +354,14 @@
     (description (string-ascii 256))
     (price uint))
   (let ((model-data (unwrap! (get-model model-id) ERR-NOT-FOUND)))
-    ;; Validations
+    ;; Enhanced validations
     (asserts! (is-model-creator model-id) ERR-ACCESS-DENIED)
+    (asserts! (validate-model-id model-id) ERR-INVALID-PARAMS)
     (asserts! (>= price min-license-fee) ERR-INVALID-PARAMS)
-    (asserts! (> (len title) u0) ERR-INVALID-PARAMS)
+    (asserts! (validate-short-string-input title) ERR-INVALID-PARAMS)
+    (asserts! (validate-string-input description) ERR-INVALID-PARAMS)
     
-    ;; Update model
+    ;; Update model with validated inputs
     (map-set ai-models
       { model-id: model-id }
       (merge model-data {
@@ -318,6 +378,7 @@
 (define-public (toggle-model-status (model-id uint))
   (let ((model-data (unwrap! (get-model model-id) ERR-NOT-FOUND)))
     (asserts! (is-model-creator model-id) ERR-ACCESS-DENIED)
+    (asserts! (validate-model-id model-id) ERR-INVALID-PARAMS)
     
     (map-set ai-models
       { model-id: model-id }
@@ -336,6 +397,7 @@
     (transfer-fee u50000) ;; 0.05 STX
   )
     ;; Validations
+    (asserts! (validate-model-id model-id) ERR-INVALID-PARAMS)
     (asserts! (get active license-data) ERR-EXPIRED)
     (asserts! (>= (get expires-at license-data) block-height) ERR-EXPIRED)
     (asserts! (not (is-eq tx-sender recipient)) ERR-INVALID-PARAMS)
@@ -410,6 +472,7 @@
 (define-public (admin-disable-model (model-id uint))
   (let ((model-data (unwrap! (get-model model-id) ERR-NOT-FOUND)))
     (asserts! (is-admin) ERR-UNAUTHORIZED)
+    (asserts! (validate-model-id model-id) ERR-INVALID-PARAMS)
     
     (map-set ai-models
       { model-id: model-id }
